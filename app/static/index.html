@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice Assistant</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --fg:#1b1f24; --muted:#6b7280; --accent:#2563eb; --user:#e0ecff; --bot:#f1f2f4; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#111418; --card:#1a1e24; --fg:#e7e9ec; --muted:#9aa3ad; --accent:#5b8cff; --user:#23324d; --bot:#22272e; } }
+  * { box-sizing: border-box; }
+  body { margin:0; font:15px/1.5 system-ui, sans-serif; background:var(--bg); color:var(--fg); }
+  main { max-width:720px; margin:0 auto; padding:24px 16px; }
+  .bar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:16px; }
+  select, input, button { font:inherit; padding:8px 12px; border-radius:8px; border:1px solid #8883; background:var(--card); color:var(--fg); }
+  button { cursor:pointer; }
+  button.primary { background:var(--accent); color:#fff; border:none; }
+  button.rec { background:#dc2626; color:#fff; border:none; }
+  #log { background:var(--card); border-radius:12px; padding:12px; min-height:300px; display:flex; flex-direction:column; gap:8px; }
+  .msg { padding:8px 12px; border-radius:10px; max-width:85%; white-space:pre-wrap; }
+  .user { background:var(--user); align-self:flex-end; }
+  .assistant { background:var(--bot); align-self:flex-start; }
+  .meta { font-size:12px; color:var(--muted); }
+  form { display:flex; gap:8px; margin-top:12px; }
+  form input { flex:1; min-width:0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>RU / KZ / EN Voice Assistant</h1>
+  <div class="bar">
+    <select id="lang">
+      <option value="ru">Русский</option>
+      <option value="kk">Қазақша</option>
+      <option value="en">English</option>
+    </select>
+    <button id="rec" class="primary">🎙 Говорить</button>
+    <span id="status" class="meta"></span>
+  </div>
+  <div id="log"></div>
+  <form id="chat">
+    <input id="text" placeholder="Или напишите сообщение…" autocomplete="off">
+    <button class="primary">Отправить</button>
+  </form>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const history = [];
+const TARGET_RATE = 16000, MAX_SECONDS = 29;
+
+function addMsg(role, text, meta) {
+  const el = document.createElement("div");
+  el.className = "msg " + role;
+  el.textContent = text;
+  if (meta) { const m = document.createElement("div"); m.className = "meta"; m.textContent = meta; el.appendChild(m); }
+  $("log").appendChild(el);
+  el.scrollIntoView({ block: "end" });
+}
+
+function flags(d) {
+  const f = [];
+  if (d.input_profanity || d.output_profanity) f.push("мат отфильтрован");
+  if (d.input_language_mismatch) f.push("язык ввода: " + d.input_language);
+  if (d.language_retries) f.push("язык ответа исправлен");
+  if (d.fallback_used) f.push("резервный ответ");
+  return f.join(" · ");
+}
+
+function remember(user, reply) {
+  history.push({ role: "user", text: user }, { role: "assistant", text: reply });
+  history.splice(0, Math.max(0, history.length - 10));
+}
+
+async function speak(text) {
+  const r = await fetch("/api/tts", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, lang: $("lang").value }) });
+  if (r.ok) new Audio(URL.createObjectURL(await r.blob())).play();
+}
+
+$("chat").onsubmit = async (e) => {
+  e.preventDefault();
+  const text = $("text").value.trim();
+  if (!text) return;
+  $("text").value = "";
+  addMsg("user", text);
+  $("status").textContent = "Думаю…";
+  const r = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, lang: $("lang").value, history }) });
+  const d = await r.json();
+  $("status").textContent = "";
+  if (!r.ok) return addMsg("assistant", "Ошибка: " + (d.detail || r.status));
+  addMsg("assistant", d.reply, flags(d));
+  remember(d.input_text, d.reply);
+  speak(d.reply);
+};
+
+// Recording: capture raw PCM, downsample to 16 kHz, send as lpcm.
+let rec = null;
+$("rec").onclick = () => rec ? stopRec() : startRec();
+
+async function startRec() {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const ctx = new AudioContext();
+  const source = ctx.createMediaStreamSource(stream);
+  const proc = ctx.createScriptProcessor(4096, 1, 1);
+  const chunks = [];
+  proc.onaudioprocess = (e) => chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+  source.connect(proc); proc.connect(ctx.destination);
+  rec = { stream, ctx, proc, chunks, timer: setTimeout(stopRec, MAX_SECONDS * 1000) };
+  $("rec").className = "rec"; $("rec").textContent = "⏹ Стоп";
+  $("status").textContent = "Запись…";
+}
+
+function toPcm16(chunks, inRate) {
+  const len = chunks.reduce((n, c) => n + c.length, 0);
+  const all = new Float32Array(len); let off = 0;
+  for (const c of chunks) { all.set(c, off); off += c.length; }
+  const ratio = inRate / TARGET_RATE, outLen = Math.floor(len / ratio);
+  const out = new Int16Array(outLen);
+  for (let i = 0; i < outLen; i++) {
+    const s = Math.max(-1, Math.min(1, all[Math.floor(i * ratio)]));
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  return out;
+}
+
+async function stopRec() {
+  const r0 = rec; rec = null;
+  clearTimeout(r0.timer);
+  r0.proc.disconnect(); r0.stream.getTracks().forEach((t) => t.stop());
+  const pcm = toPcm16(r0.chunks, r0.ctx.sampleRate);
+  r0.ctx.close();
+  $("rec").className = "primary"; $("rec").textContent = "🎙 Говорить";
+  $("status").textContent = "Распознаю…";
+
+  const fd = new FormData();
+  fd.append("audio", new Blob([pcm.buffer]), "speech.pcm");
+  fd.append("lang", $("lang").value);
+  fd.append("format", "lpcm");
+  fd.append("sample_rate", String(TARGET_RATE));
+  fd.append("history", JSON.stringify(history));
+  const r = await fetch("/api/voice", { method: "POST", body: fd });
+  const d = await r.json();
+  $("status").textContent = "";
+  if (!r.ok) return addMsg("assistant", "Ошибка: " + (d.detail || r.status));
+  addMsg("user", d.transcript || "…");
+  addMsg("assistant", d.reply, flags(d));
+  if (d.transcript) remember(d.input_text, d.reply);
+  new Audio(`data:${d.audio_mime};base64,${d.audio_base64}`).play();
+}
+</script>
+</body>
+</html>
