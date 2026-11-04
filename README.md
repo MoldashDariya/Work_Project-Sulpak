@@ -2,6 +2,8 @@
 
 Voice assistant module developed as part of a project at **SULPAK**.
 
+Built at **2Code LLP** for **SULPAK** as a team project. My part: the NLP setup and the NLP work in this module: speech recognition and synthesis (Yandex SpeechKit), LLM replies, language enforcement and profanity filtering.
+
 > **Note:** this repository contains only the parts of the code that I was allowed to publish.
 > The rest of the SULPAK project (business logic, integrations, data and infrastructure) is
 > confidential and is not included here.
